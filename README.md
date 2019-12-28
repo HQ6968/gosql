@@ -2,11 +2,21 @@
 The package based on [sqlx](https://github.com/jmoiron/sqlx), It's simple and keep simple
 
 <a href="https://travis-ci.org/ilibs/gosql"><img src="https://travis-ci.org/ilibs/gosql.svg" alt="Build Status"></a>
+<a href="https://github.com/ilibs/gosql/actions"><img src="https://github.com/ilibs/gosql/workflows/gosql/badge.svg" alt="Build Status"></a>
 <a href="https://codecov.io/gh/ilibs/gosql"><img src="https://codecov.io/gh/ilibs/gosql/branch/master/graph/badge.svg" alt="codecov"></a>
 <a href="https://goreportcard.com/report/github.com/ilibs/gosql"><img src="https://goreportcard.com/badge/github.com/ilibs/gosql" alt="Go Report Card
 "></a>
 <a href="https://godoc.org/github.com/ilibs/gosql"><img src="https://godoc.org/github.com/ilibs/gosql?status.svg" alt="GoDoc"></a>
 <a href="https://opensource.org/licenses/mit-license.php" rel="nofollow"><img src="https://badges.frapsoft.com/os/mit/mit.svg?v=103"></a>
+
+⚠️ Because of some disruptive changes, The current major version is upgraded to V2，If you continue with V1, you can check out the v1 branches [https://github.com/ilibs/gosql/tree/v1](https://github.com/ilibs/gosql/tree/v1)
+
+## V2 ChangeLog
+- Remove the second argument to the Model() and Table() functions and replace it with WithTx(tx)
+- Remove Model interface DbName() function,use the Use() function 
+- Uniform API design specification, see [APIDESIGN](APIDESIGN.md)
+- Relation add `connection:"db2"` struct tag, Solve the cross-library connection problem caused by deleting DbName()
+- Discard the WithTx function
 
 ## Usage
 
@@ -15,7 +25,7 @@ Connection database and use sqlx original function,See the https://github.com/jm
 ```go
 import (
     _ "github.com/go-sql-driver/mysql" //mysql driver
-    "github.com/ilibs/gosql"
+    "github.com/ilibs/gosql/v2"
 )
 
 func main(){
@@ -30,8 +40,7 @@ func main(){
 
     //connection database
     gosql.Connect(configs)
-
-    gosql.DB().QueryRowx("select * from users where id = 1")
+    gosql.QueryRowx("select * from users where id = 1")
 }
 
 ```
@@ -48,6 +57,7 @@ for rows.Next() {
     user := &Users{}
     err = rows.StructScan(user)
 }
+rows.Close()
 
 //QueryRowx
 user := &Users{}
@@ -66,6 +76,15 @@ db := gosql.Use("test")
 db.Queryx("select * from tests")
 ```
 
+You can also set the default database connection name
+
+```go
+gosql.SetDefaultLink("log")
+gosql.Connect(configs)
+```
+
+> `gosql.Get` etc., will use the configuration with the connection name `log` 
+
 ## Using struct
 
 ```go
@@ -76,10 +95,6 @@ type Users struct {
 	Status    int       `db:"status"`
 	CreatedAt time.Time `db:"created_at"`
 	UpdatedAt time.Time `db:"updated_at"`
-}
-
-func (u *Users) DbName() string {
-	return "default"
 }
 
 func (u *Users) TableName() string {
@@ -141,15 +156,16 @@ gosql.Model(&user).Get("status")
 The `Tx` function has a callback function, if an error is returned, the transaction rollback
 
 ```go
-gosql.Tx(func(tx *sqlx.Tx) error {
+gosql.Tx(func(tx *gosql.DB) error {
     for id := 1; id < 10; id++ {
         user := &Users{
             Id:    id,
             Name:  "test" + strconv.Itoa(id),
             Email: "test" + strconv.Itoa(id) + "@test.com",
         }
-
-        gosql.Model(user, tx).Create()
+		
+		//v2 support, do some database operations in the transaction (use 'tx' from this point, not 'gosql')
+        tx.Model(user).Create()
 
         if id == 8 {
             return errors.New("interrupt the transaction")
@@ -158,7 +174,7 @@ gosql.Tx(func(tx *sqlx.Tx) error {
 
     //query with transaction
     var num int
-    err := gosql.WithTx(tx).QueryRowx("select count(*) from user_id = 1").Scan(&num)
+    err := tx.QueryRowx("select count(*) from user_id = 1").Scan(&num)
 
     if err != nil {
         return err
@@ -192,6 +208,7 @@ AUTO_UPDATE_TIME_FIELDS = []string{
 
 ## Using Map
 `Create` `Update` `Delete` `Count` support `map[string]interface`,For example:
+
 ```go
 //Create
 gosql.Table("users").Create(map[string]interface{}{
@@ -217,8 +234,8 @@ gosql.Table("users").Where("id = ?", 1).Count()
 //Change database
 gosql.Use("db2").Table("users").Where("id = ?", 1).Count()
 
-//Transaction `tx` is *sqlx.Tx
-gosql.Table("users",tx).Where("id = ?", 1}).Count()
+//Transaction `tx`
+tx.Table("users").Where("id = ?", 1}).Count()
 ```
 
 
@@ -244,7 +261,7 @@ user := &Users{
     }
 }
 
-err := Model(user).Get()
+err := gosql.Model(user).Get()
 ```
 
 Builder SQL:
@@ -261,7 +278,7 @@ If `sql.NullString` of `Valid` attribute is false, SQL builder will ignore this 
 ## gosql.Expr
 Reference GORM Expr, Resolve update field self-update problem
 ```go
-Table("users").Update(map[string]interface{}{
+gosql.Table("users").Update(map[string]interface{}{
     "id":2,
     "count":gosql.Expr("count+?",1)
 })
@@ -290,25 +307,30 @@ user := make([]*Users, 0)
 err := gosql.Select(&user, "select * from users where id in(?)",[]int{1,2,3})
 ```
 
-
 ## Relation
 gosql used the golang structure to express the relationships between tables,You only need to use the `relation` Tag to specify the associated field, see example
+
+⚠️ Since version v2, the relation query across library connections needs to be specified using `connection` tag
+
+
 ```go
 type MomentList struct {
 	models.Moments
 	User   *models.Users    `json:"user" db:"-" relation:"user_id,id"`         //one-to-one
-	Photos []*models.Photos `json:"photos" db:"-" relation:"id,moment_id"`     //one-to-many
+	Photos []*models.Photos `json:"photos" db:"-" relation:"id,moment_id" connection:"db2"`     //one-to-many
 }
 ```
 
 Get single result
+
 ```go
 moment := &MomentList{}
-err := Model(moment).Where("status = 1 and id = ?",14).Get()
+err := gosql.Model(moment).Where("status = 1 and id = ?",14).Get()
 //output User and Photos and you get the result
 ```
 
 SQL:
+
 ```sql
 2018/12/06 13:27:54
 	Query: SELECT * FROM `moments` WHERE (status = 1 and id = ?);
@@ -327,13 +349,15 @@ SQL:
 ```
 
 Get list result, many-to-many
+
 ```go
 var moments = make([]*MomentList, 0)
-err := Model(&moments).Where("status = 1").Limit(10).All()
+err := gosql.Model(&moments).Where("status = 1").Limit(10).All()
 //You get the total result  for *UserMoment slice
 ```
 
 SQL:
+
 ```sql
 2018/12/06 13:50:59
 	Query: SELECT * FROM `moments` WHERE (status = 1) LIMIT 10;
@@ -352,9 +376,10 @@ SQL:
 
 
 Relation Where:
+
 ```go
 moment := &MomentList{}
-err := Relation("User" , func(b *Builder) {
+err := gosql.Relation("User" , func(b *gosql.ModelStruct) {
     //this is builder instance,
     b.Where("gender = 0")
 }).Get(moment , "select * from moments")
@@ -385,10 +410,10 @@ func (u *Users) BeforeCreate() (err error) {
   return
 }
 
-func (u *Users) AfterCreate(tx *sqlx.tx) (err error) {
+func (u *Users) AfterCreate(tx *gosql.DB) (err error) {
   if u.Id == 1 {
     u.Email = "after@test.com"
-    Model(u,tx).Update()
+    tx.Model(u).Update()
   }
   return
 }
@@ -416,8 +441,8 @@ Hook func type supports multiple ways:
 ```
 func (u *Users) BeforeCreate()
 func (u *Users) BeforeCreate() (err error)
-func (u *Users) BeforeCreate(tx *sqlx.Tx)
-func (u *Users) BeforeCreate(tx *sqlx.Tx) (err error)
+func (u *Users) BeforeCreate(tx *gosql.DB)
+func (u *Users) BeforeCreate(tx *gosql.DB) (err error)
 ```
 
 
